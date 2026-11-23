@@ -179,6 +179,36 @@ jobs:
           cp "$APK" ASTRA.apk
           sha256sum ASTRA.apk
 
+      - name: Update ASTRA update manifest
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+        env:
+          VERSION: ${{ env.VERSION }}
+          TAG: ${{ env.TAG }}
+        run: |
+          SHA256="$(sha256sum ASTRA.apk | awk '{print $1}')"
+          python3 - <<'PY'
+          import json, os
+          manifest = {
+              "version": os.environ["VERSION"],
+              "apk_url": f"https://github.com/leoblanchart92-hub/Jarvis/releases/download/{os.environ['TAG']}/ASTRA.apk",
+              "sha256": os.environ["SHA256"],
+              "notes": f"ASTRA {os.environ['TAG']}"
+          }
+          os.makedirs("updates", exist_ok=True)
+          with open("updates/latest.json", "w", encoding="utf-8") as f:
+              json.dump(manifest, f, ensure_ascii=False, separators=(",", ":"))
+              f.write("\\n")
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add updates/latest.json
+          if ! git diff --cached --quiet; then
+            git commit -m "Update ASTRA update manifest for $TAG"
+            git push origin HEAD:main
+          else
+            echo "ASTRA update manifest already up to date."
+          fi
+
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
