@@ -74,8 +74,13 @@ class AppUpdate {
     }
   }
 
+  // Stream APK to disk and hash each chunk to avoid holding the large APK in RAM.
   Future<void> downloadAndInstall(void Function(double) onProgress) async {
     final client = http.Client();
+    File? file;
+    IOSink? fileSink;
+    DigestSink? digestSink;
+    ByteConversionSink? hashSink;
     try {
       final request = http.Request('GET', apkUrl)
         ..headers['Accept'] = 'application/octet-stream'
@@ -85,22 +90,35 @@ class AppUpdate {
         throw Exception('Téléchargement impossible (HTTP ${response.statusCode}).');
       }
 
-      final builder = BytesBuilder(copy: false);
+      final dir = await getTemporaryDirectory();
+      file = File('${dir.path}/ASTRA-$latestVersion.apk');
+      if (await file.exists()) await file.delete();
+      fileSink = file.openWrite();
+      digestSink = DigestSink();
+      hashSink = sha256.startChunkedConversion(digestSink);
       var received = 0;
       final total = response.contentLength ?? 0;
       await for (final chunk in response.stream.timeout(const Duration(seconds: 45))) {
-        builder.add(chunk);
+        fileSink.add(chunk);
+        hashSink.add(chunk);
         received += chunk.length;
         if (total > 0) onProgress((received / total).clamp(0.0, 1.0).toDouble());
       }
-      final bytes = builder.takeBytes();
-      if (bytes.length < 100 * 1024) throw Exception('Le fichier APK semble incomplet.');
-      final actualHash = sha256.convert(bytes).toString();
-      if (actualHash != expectedSha256) throw Exception('Vérification SHA-256 échouée : APK rejeté.');
+      hashSink.close();
+      await fileSink.flush();
+      await fileSink.close();
+      fileSink = null;
+      hashSink = null;
 
-      final dir = await getTemporaryDirectory();
-      final file = File('${dir.path}/ASTRA-$latestVersion.apk');
-      await file.writeAsBytes(bytes, flush: true);
+      final fileSize = await file.length();
+      if (fileSize < 100 * 1024 || (total > 0 && fileSize != total)) {
+        throw Exception('Le fichier APK semble incomplet.');
+      }
+      final actualHash = digestSink.value.toString();
+      if (actualHash != expectedSha256) {
+        throw Exception('Vérification SHA-256 échouée : APK rejeté.');
+      }
+
       final result = await OpenFilex.open(file.path, type: 'application/vnd.android.package-archive');
       if (result.type != ResultType.done) {
         throw Exception(result.message.isEmpty ? 'Android n’a pas pu ouvrir l’installateur.' : result.message);
@@ -108,6 +126,7 @@ class AppUpdate {
     } on SocketException {
       throw Exception('Connexion interrompue pendant le téléchargement.');
     } finally {
+      if (fileSink != null) await fileSink.close();
       client.close();
     }
   }
