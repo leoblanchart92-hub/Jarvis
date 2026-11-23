@@ -215,7 +215,7 @@ jobs:
           os.makedirs("updates", exist_ok=True)
           with open("updates/latest.json", "w", encoding="utf-8") as f:
               json.dump(manifest, f, ensure_ascii=False, separators=(",", ":"))
-              f.write("\\n")
+              f.write("\n")
           PY
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
