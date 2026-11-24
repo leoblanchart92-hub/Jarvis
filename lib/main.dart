@@ -199,6 +199,27 @@ class _AssistantHomeState extends State<AssistantHome> with TickerProviderStateM
   }
 
 
+  Future<void> startNativeWakeService() async {
+    if (!wakeMode || !voiceReady || wakeSession) return;
+    try { await wakeChannel.invokeMethod<void>('startWakeService'); } catch (_) {}
+  }
+
+  Future<void> consumeWakeIntent() async {
+    try {
+      final detected = await wakeChannel.invokeMethod<bool>('consumeWakeIntent') ?? false;
+      if (detected) await handleWakeDetected();
+    } catch (_) {}
+  }
+
+  Future<void> handleWakeDetected() async {
+    if (!mounted || !wakeMode || wakeSession) return;
+    wakeSession = true;
+    await speech.stop();
+    if (mounted) setState(() => listening = false);
+    await speak('Oui, je vous écoute.');
+    await startCommandListening();
+  }
+
   // Wake-word listener: waits for the phrase "Hey Astra" while the app is open.
   Future<void> startWakeListening() async {
     await startNativeWakeService();
@@ -219,7 +240,7 @@ class _AssistantHomeState extends State<AssistantHome> with TickerProviderStateM
           setState(() {});
           if (result.finalResult) {
             setState(() { listening = false; });
-            send();
+            await send();
             wakeSession = false;
             restartWakeListening();
           }
@@ -227,6 +248,7 @@ class _AssistantHomeState extends State<AssistantHome> with TickerProviderStateM
       );
     } catch (_) {
       listening = false;
+      await send();
       wakeSession = false;
       restartWakeListening();
     }
