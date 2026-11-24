@@ -67,6 +67,211 @@ jobs:
             cp -R /tmp/astra-lib lib
           fi
 
+
+      - name: Install native Hey Astra foreground service
+        run: |
+          mkdir -p android/app/src/main/kotlin/com/astra/jarvis
+          cat > android/app/src/main/kotlin/com/astra/jarvis/MainActivity.kt <<'KOTLIN'
+          package com.astra.jarvis
+
+          import android.content.Intent
+          import android.os.Build
+          import io.flutter.embedding.android.FlutterActivity
+          import io.flutter.embedding.engine.FlutterEngine
+          import io.flutter.plugin.common.MethodChannel
+
+          class MainActivity : FlutterActivity() {
+              private val channelName = "com.astra.jarvis/wake"
+
+              override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+                  super.configureFlutterEngine(flutterEngine)
+                  MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName).setMethodCallHandler { call, result ->
+                      when (call.method) {
+                          "startWakeService" -> {
+                              val service = Intent(this, AstraWakeService::class.java)
+                              if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(service) else startService(service)
+                              result.success(null)
+                          }
+                          "stopWakeService" -> {
+                              stopService(Intent(this, AstraWakeService::class.java))
+                              result.success(null)
+                          }
+                          "consumeWakeIntent" -> {
+                              val detected = intent?.getBooleanExtra("astra_wake_detected", false) == true
+                              if (detected) intent?.removeExtra("astra_wake_detected")
+                              result.success(detected)
+                          }
+                          else -> result.notImplemented()
+                      }
+                  }
+              }
+
+              override fun onNewIntent(intent: Intent) {
+                  super.onNewIntent(intent)
+                  setIntent(intent)
+              }
+          }
+          KOTLIN
+          cat > android/app/src/main/kotlin/com/astra/jarvis/AstraWakeService.kt <<'KOTLIN'
+          package com.astra.jarvis
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.PendingIntent
+          import android.app.Service
+          import android.content.Intent
+          import android.os.Build
+          import android.os.Handler
+          import android.os.IBinder
+          import android.os.Looper
+          import android.speech.RecognitionListener
+          import android.speech.RecognizerIntent
+          import android.speech.SpeechRecognizer
+          import androidx.core.app.NotificationCompat
+          import java.util.Locale
+
+          class AstraWakeService : Service() {
+              private val handler = Handler(Looper.getMainLooper())
+              private var recognizer: SpeechRecognizer? = null
+              private var stopping = false
+              private val channelId = "astra_wake_service"
+              private val notificationId = 6108
+
+              override fun onCreate() {
+                  super.onCreate()
+                  createNotificationChannel()
+                  val openApp = Intent(this, MainActivity::class.java).apply {
+                      flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                  }
+                  val pending = PendingIntent.getActivity(this, 0, openApp,
+                      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+                  val notification: Notification = NotificationCompat.Builder(this, channelId)
+                      .setSmallIcon(applicationInfo.icon)
+                      .setContentTitle("ASTRA écoute « Hey Astra »")
+                      .setContentText("Micro actif. Appuie pour ouvrir ASTRA et désactiver l’écoute.")
+                      .setContentIntent(pending)
+                      .setOngoing(true)
+                      .setCategory(NotificationCompat.CATEGORY_SERVICE)
+                      .build()
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                      startForeground(notificationId, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+                  } else {
+                      startForeground(notificationId, notification)
+                  }
+              }
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  stopping = false
+                  startRecognition()
+                  return START_STICKY
+              }
+
+              private fun createNotificationChannel() {
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      val channel = NotificationChannel(channelId, "Écoute Hey Astra", NotificationManager.IMPORTANCE_LOW)
+                      channel.description = "Indique quand ASTRA écoute la phrase de réveil."
+                      getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+                  }
+              }
+
+              private fun startRecognition() {
+                  if (stopping || !SpeechRecognizer.isRecognitionAvailable(this)) return
+                  try {
+                      recognizer?.destroy()
+                      recognizer = SpeechRecognizer.createSpeechRecognizer(this)
+                      recognizer?.setRecognitionListener(object : RecognitionListener {
+                          override fun onReadyForSpeech(params: android.os.Bundle?) {}
+                          override fun onBeginningOfSpeech() {}
+                          override fun onRmsChanged(rmsdB: Float) {}
+                          override fun onBufferReceived(buffer: ByteArray?) {}
+                          override fun onEndOfSpeech() {}
+                          override fun onError(error: Int) { scheduleRestart() }
+                          override fun onResults(results: android.os.Bundle?) {
+                              if (checkPhrase(results)) return
+                              scheduleRestart()
+                          }
+                          override fun onPartialResults(partialResults: android.os.Bundle?) { checkPhrase(partialResults) }
+                          override fun onEvent(eventType: Int, params: android.os.Bundle?) {}
+                      })
+                      val speechIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                          putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                          putExtra(RecognizerIntent.EXTRA_LANGUAGE, "fr-FR")
+                          putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "fr-FR")
+                          putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                          putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
+                          putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
+                      }
+                      recognizer?.startListening(speechIntent)
+                  } catch (_: Exception) { scheduleRestart() }
+              }
+
+              private fun checkPhrase(bundle: android.os.Bundle?): Boolean {
+                  val phrases = bundle?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION) ?: return false
+                  val found = phrases.any { it.lowercase(Locale.ROOT).replace("’", "'").contains(Regex("\\bhey\\s+astra\\b")) }
+                  if (found && !stopping) {
+                      stopping = true
+                      handler.removeCallbacksAndMessages(null)
+                      try { recognizer?.cancel(); recognizer?.destroy() } catch (_: Exception) {}
+                      recognizer = null
+                      val launch = Intent(this, MainActivity::class.java).apply {
+                          flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                          putExtra("astra_wake_detected", true)
+                      }
+                      startActivity(launch)
+                      stopSelf()
+                      return true
+                  }
+                  return false
+              }
+
+              private fun scheduleRestart() {
+                  if (!stopping) handler.postDelayed({ startRecognition() }, 1200)
+              }
+
+              override fun onDestroy() {
+                  stopping = true
+                  handler.removeCallbacksAndMessages(null)
+                  try { recognizer?.cancel(); recognizer?.destroy() } catch (_: Exception) {}
+                  recognizer = null
+                  super.onDestroy()
+              }
+
+              override fun onBind(intent: Intent?): IBinder? = null
+          }
+          KOTLIN
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+          p = Path("android/app/src/main/AndroidManifest.xml")
+          tree = ET.parse(p)
+          root = tree.getroot()
+          ns = "http://schemas.android.com/apk/res/android"
+          ET.register_namespace("android", ns)
+          permissions = {
+              "android.permission.FOREGROUND_SERVICE",
+              "android.permission.FOREGROUND_SERVICE_MICROPHONE",
+              "android.permission.POST_NOTIFICATIONS",
+              "android.permission.RECORD_AUDIO",
+          }
+          existing = {e.get(f"{{{ns}}}name") for e in root.findall("uses-permission")}
+          for permission in permissions - existing:
+              e = ET.Element("uses-permission", {f"{{{ns}}}name": permission})
+              root.insert(0, e)
+          app = root.find("application")
+          if app is None:
+              raise SystemExit("AndroidManifest application element missing")
+          service_name = ".AstraWakeService"
+          service = next((e for e in app.findall("service") if e.get(f"{{{ns}}}name") == service_name), None)
+          if service is None:
+              service = ET.SubElement(app, "service")
+          service.set(f"{{{ns}}}name", service_name)
+          service.set(f"{{{ns}}}enabled", "true")
+          service.set(f"{{{ns}}}exported", "false")
+          service.set(f"{{{ns}}}foregroundServiceType", "microphone")
+          tree.write(p, encoding="utf-8", xml_declaration=True)
+          PY
+
       - name: Lock ASTRA Android package identity
         run: |
           python3 - <<'PY'
