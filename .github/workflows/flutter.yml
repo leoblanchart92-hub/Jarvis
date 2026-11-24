@@ -331,7 +331,7 @@ jobs:
               raise SystemExit("ASTRA_SIGNING_BUNDLE secret is missing.")
           try:
               bundle = json.loads(raw)
-              encoded = re.sub(r"\\s+", "", bundle["keystore_base64"])
+              encoded = re.sub(r"\s+", "", bundle["keystore_base64"])
               decoded = base64.b64decode(encoded, validate=True)
               store_password = bundle["store_password"]
               key_password = bundle["key_password"]
@@ -365,7 +365,7 @@ jobs:
               "    }",
           ]
           if 'create("astraRelease")' not in gradle:
-              gradle = gradle.replace("android {", "android {\\n" + "\\n".join(signing_lines), 1)
+              gradle = gradle.replace("android {", "android {\n" + "\n".join(signing_lines), 1)
           gradle = gradle.replace(
               'signingConfig = signingConfigs.getByName("debug")',
               'signingConfig = signingConfigs.getByName("astraRelease")'
@@ -381,7 +381,7 @@ jobs:
                   ("ASTRA_KEY_PASSWORD", key_password),
                   ("ASTRA_KEY_ALIAS", alias),
               ):
-                  github_env.write(f"{name}<<{delimiter}\\n{value}\\n{delimiter}\\n")
+                  github_env.write(f"{name}<<{delimiter}\n{value}\n{delimiter}\n")
 
           subprocess.run([
               "keytool", "-list", "-keystore", str(keystore),
