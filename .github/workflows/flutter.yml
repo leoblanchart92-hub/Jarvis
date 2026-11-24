@@ -128,8 +128,7 @@ jobs:
           import android.speech.RecognitionListener
           import android.speech.RecognizerIntent
           import android.speech.SpeechRecognizer
-          import androidx.core.app.NotificationCompat
-          import java.util.Locale
+                    import java.util.Locale
 
           class AstraWakeService : Service() {
               private val handler = Handler(Looper.getMainLooper())
@@ -146,13 +145,14 @@ jobs:
                   }
                   val pending = PendingIntent.getActivity(this, 0, openApp,
                       PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-                  val notification: Notification = NotificationCompat.Builder(this, channelId)
+                  val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) Notification.Builder(this, channelId) else Notification.Builder(this)
+                  val notification: Notification = builder
                       .setSmallIcon(applicationInfo.icon)
                       .setContentTitle("ASTRA écoute « Hey Astra »")
-                      .setContentText("Micro actif. Appuie pour ouvrir ASTRA et désactiver l’écoute.")
+                      .setContentText("Micro actif. Appuie pour ouvrir ASTRA et gérer l’écoute.")
                       .setContentIntent(pending)
                       .setOngoing(true)
-                      .setCategory(NotificationCompat.CATEGORY_SERVICE)
+                      .setCategory(Notification.CATEGORY_SERVICE)
                       .build()
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                       startForeground(notificationId, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
