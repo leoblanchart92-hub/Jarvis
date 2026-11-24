@@ -317,38 +317,31 @@ jobs:
           tree.write(path, encoding="utf-8", xml_declaration=True)
           PY
 
-      - name: Configure permanent ASTRA release signing (single secret)
+      - name: Configure ASTRA release signing (one user password)
         env:
-          ASTRA_SIGNING_BUNDLE: ${{ secrets.ASTRA_SIGNING_BUNDLE }}
+          ASTRA_SIGNING_KEY: ${{ secrets.ASTRA_SIGNING_KEY }}
         run: |
           set -e
           python3 - <<'PY'
           import os, base64, json, re, subprocess, uuid
           from pathlib import Path
 
-          raw = os.getenv("ASTRA_SIGNING_BUNDLE", "").strip()
+          raw = os.getenv("ASTRA_SIGNING_KEY", "").strip()
           if not raw:
-              raise SystemExit("ASTRA_SIGNING_BUNDLE secret is missing.")
+              raise SystemExit("ASTRA_SIGNING_KEY secret is missing.")
           try:
-              bundle = json.loads(raw)
-              encoded = re.sub(r"\s+", "", bundle["keystore_base64"])
+              data = json.loads(raw)
+              encoded = re.sub(r"\\s+", "", data["keystore_base64"])
               decoded = base64.b64decode(encoded, validate=True)
-              store_password = bundle["store_password"]
-              key_password = bundle["key_password"]
-              alias = bundle.get("key_alias", "astra").strip() or "astra"
+              password = data["password"]
+              alias = data.get("alias", "astra").strip() or "astra"
           except Exception:
-              raise SystemExit("ASTRA_SIGNING_BUNDLE is invalid. Expected JSON with keystore_base64, store_password, key_password and optional key_alias.")
-          if not decoded or not store_password or not key_password:
-              raise SystemExit("ASTRA_SIGNING_BUNDLE is missing required signing data.")
+              raise SystemExit("ASTRA_SIGNING_KEY is invalid. Recreate it with the ASTRA PowerShell script.")
+          if not decoded or not password:
+              raise SystemExit("ASTRA_SIGNING_KEY is missing the keystore or password.")
 
           keystore = Path("android/app/astra-release.jks")
           keystore.write_bytes(decoded)
-          env = os.environ.copy()
-          env.update({
-              "ASTRA_KEYSTORE_PASSWORD": store_password,
-              "ASTRA_KEY_PASSWORD": key_password,
-              "ASTRA_KEY_ALIAS": alias,
-          })
 
           gradle_path = Path("android/app/build.gradle.kts")
           if not gradle_path.exists():
@@ -358,14 +351,14 @@ jobs:
               "    signingConfigs {",
               '        create("astraRelease") {',
               '            storeFile = file("astra-release.jks")',
-              '            storePassword = System.getenv("ASTRA_KEYSTORE_PASSWORD")',
-              '            keyAlias = System.getenv("ASTRA_KEY_ALIAS") ?: "astra"',
-              '            keyPassword = System.getenv("ASTRA_KEY_PASSWORD")',
+              '            storePassword = System.getenv("ASTRA_SIGNING_PASSWORD")',
+              '            keyAlias = System.getenv("ASTRA_SIGNING_ALIAS") ?: "astra"',
+              '            keyPassword = System.getenv("ASTRA_SIGNING_PASSWORD")',
               "        }",
               "    }",
           ]
           if 'create("astraRelease")' not in gradle:
-              gradle = gradle.replace("android {", "android {\n" + "\n".join(signing_lines), 1)
+              gradle = gradle.replace("android {", "android {\\n" + "\\n".join(signing_lines), 1)
           gradle = gradle.replace(
               'signingConfig = signingConfigs.getByName("debug")',
               'signingConfig = signingConfigs.getByName("astraRelease")'
@@ -375,19 +368,15 @@ jobs:
           gradle_path.write_text(gradle)
 
           delimiter = "ASTRA_" + uuid.uuid4().hex
-          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as github_env:
-              for name, value in (
-                  ("ASTRA_KEYSTORE_PASSWORD", store_password),
-                  ("ASTRA_KEY_PASSWORD", key_password),
-                  ("ASTRA_KEY_ALIAS", alias),
-              ):
-                  github_env.write(f"{name}<<{delimiter}\n{value}\n{delimiter}\n")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
+              for name, value in (("ASTRA_SIGNING_PASSWORD", password), ("ASTRA_SIGNING_ALIAS", alias)):
+                  f.write(f"{name}<<{delimiter}\\n{value}\\n{delimiter}\\n")
 
           subprocess.run([
               "keytool", "-list", "-keystore", str(keystore),
-              "-storepass", store_password, "-alias", alias
+              "-storepass", password, "-alias", alias
           ], check=True, stdout=subprocess.DEVNULL)
-          print("ASTRA release keystore verified from the single signing secret.")
+          print("ASTRA signing key verified.")
           PY
 
       - name: Install dependencies
