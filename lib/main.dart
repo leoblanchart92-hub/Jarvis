@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
@@ -32,7 +33,8 @@ class AssistantHome extends StatefulWidget {
   State<AssistantHome> createState() => _AssistantHomeState();
 }
 
-class _AssistantHomeState extends State<AssistantHome> with TickerProviderStateMixin {
+class _AssistantHomeState extends State<AssistantHome> with TickerProviderStateMixin, WidgetsBindingObserver {
+  static const MethodChannel wakeChannel = MethodChannel('com.astra.jarvis/wake');
   late final AnimationController pulse;
   late final AnimationController orbit;
   final message = TextEditingController();
@@ -55,7 +57,7 @@ class _AssistantHomeState extends State<AssistantHome> with TickerProviderStateM
       internetEnabled = prefs.getBool('astra_internet') ?? true;
       wakeMode = prefs.getBool('astra_wake_mode') ?? false;
     });
-    if (wakeMode && voiceReady) restartWakeListening();
+    if (wakeMode && voiceReady) startNativeWakeService();
   }
 
   Future<void> setWifiOnly(bool value) async {
@@ -76,18 +78,27 @@ class _AssistantHomeState extends State<AssistantHome> with TickerProviderStateM
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Microphone indisponible. Vérifie la permission.')));
       return;
     }
-    setState(() { wakeMode = value; wakeSession = false; });
+    try {
+      await speech.stop();
+      if (value) {
+        await wakeChannel.invokeMethod<void>('startWakeService');
+      } else {
+        await wakeChannel.invokeMethod<void>('stopWakeService');
+      }
+    } on PlatformException catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Service vocal indisponible : ${e.message ?? e.code}')));
+      return;
+    } on MissingPluginException {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Le service vocal Android n’est pas encore disponible dans cette version.')));
+      return;
+    }
+    if (!mounted) return;
+    setState(() { wakeMode = value; wakeSession = false; listening = false; });
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('astra_wake_mode', value);
-    await speech.stop();
-    if (value) {
-      listening = false;
-      restartWakeListening();
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Écoute de « Hey Astra » activée tant que l’application reste ouverte.')));
-    } else {
-      if (mounted) setState(() { listening = false; });
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Écoute vocale désactivée.')));
-    }
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(value
+      ? '« Hey Astra » est actif en arrière-plan. Une notification permanente indique que le micro écoute.'
+      : 'Écoute « Hey Astra » désactivée.')));
   }
 
   Future<void> loadBrain() async {
@@ -147,10 +158,15 @@ class _AssistantHomeState extends State<AssistantHome> with TickerProviderStateM
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    wakeChannel.setMethodCallHandler((call) async {
+      if (call.method == 'wakeDetected') await handleWakeDetected();
+    });
     pulse = AnimationController(vsync: this, duration: const Duration(seconds: 2))..repeat(reverse: true);
     orbit = AnimationController(vsync: this, duration: const Duration(seconds: 18))..repeat();
     initVoice();
     loadSettings();
+    WidgetsBinding.instance.addPostFrameCallback((_) => consumeWakeIntent());
   }
 
 
@@ -161,7 +177,7 @@ class _AssistantHomeState extends State<AssistantHome> with TickerProviderStateM
       await tts.setSpeechRate(0.48);
       await tts.setVolume(1.0);
       if (mounted) setState(() {});
-      if (wakeMode) restartWakeListening();
+      if (wakeMode) startNativeWakeService();
     } catch (_) { voiceReady = false; if (mounted) setState(() {}); }
   }
 
@@ -185,37 +201,7 @@ class _AssistantHomeState extends State<AssistantHome> with TickerProviderStateM
 
   // Wake-word listener: waits for the phrase "Hey Astra" while the app is open.
   Future<void> startWakeListening() async {
-    if (!wakeMode || !voiceReady || listening || wakeSession) return;
-    try {
-      if (mounted) setState(() => listening = true);
-      await speech.listen(
-        localeId: 'fr_FR',
-        listenFor: const Duration(seconds: 30),
-        pauseFor: const Duration(seconds: 5),
-        onResult: (result) {
-          if (!mounted || !wakeMode || wakeSession) return;
-          final heard = result.recognizedWords.trim();
-          if (RegExp(r'\bhey\s+astra\b', caseSensitive: false).hasMatch(heard)) {
-            wakeSession = true;
-            speech.stop();
-            final command = heard.replaceFirst(RegExp(r'\bhey\s+astra\b', caseSensitive: false), '').trim();
-            if (command.isNotEmpty) {
-              message.text = command;
-              setState(() { listening = false; });
-              send();
-              wakeSession = false;
-              restartWakeListening();
-            } else {
-              setState(() { listening = false; });
-              speak('Oui, je vous écoute.');
-              startCommandListening();
-            }
-          }
-        },
-      );
-    } catch (_) {
-      listening = false;
-    }
+    await startNativeWakeService();
   }
 
   Future<void> startCommandListening() async {
@@ -247,9 +233,14 @@ class _AssistantHomeState extends State<AssistantHome> with TickerProviderStateM
   }
 
   void restartWakeListening() {
-    Future.delayed(const Duration(milliseconds: 5000), () {
-      if (mounted && wakeMode && !wakeSession) startWakeListening();
+    Future.delayed(const Duration(seconds: 2), () {
+      if (mounted && wakeMode && !wakeSession) startNativeWakeService();
     });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) consumeWakeIntent();
   }
 
   Future<void> toggleWakeMode() => setWakeMode(!wakeMode);
@@ -377,7 +368,7 @@ class _AssistantHomeState extends State<AssistantHome> with TickerProviderStateM
   }
 
   @override
-  void dispose() { pulse.dispose(); orbit.dispose(); message.dispose(); scroll.dispose(); super.dispose(); }
+  void dispose() { WidgetsBinding.instance.removeObserver(this); wakeChannel.setMethodCallHandler(null); pulse.dispose(); orbit.dispose(); message.dispose(); scroll.dispose(); super.dispose(); }
 
   @override
   Widget build(BuildContext context) => Scaffold(
@@ -389,7 +380,7 @@ class _AssistantHomeState extends State<AssistantHome> with TickerProviderStateM
             const Expanded(child: Text('PARAMÈTRES', style: TextStyle(color: cyan, fontSize: 15, letterSpacing: 2))),
           ])),
           const Divider(color: Color(0x3354E8FF)),
-          SwitchListTile(title: const Text('Activer « Hey Astra »'), subtitle: const Text('Écoute uniquement quand ASTRA est ouvert'), value: wakeMode, onChanged: setWakeMode, activeColor: cyan),
+          SwitchListTile(title: const Text('Activer « Hey Astra »'), subtitle: const Text('Écoute en arrière-plan avec notification permanente et consommation de batterie'), value: wakeMode, onChanged: setWakeMode, activeColor: cyan),
           SwitchListTile(title: const Text('Téléchargement Wi-Fi uniquement'), subtitle: const Text('Évite d’utiliser les données mobiles pour télécharger le modèle'), value: wifiOnly, onChanged: setWifiOnly, activeColor: cyan),
           SwitchListTile(title: const Text('Accès Internet pour recherches'), subtitle: const Text('ASTRA peut rechercher des informations récentes sur le Web'), value: internetEnabled, onChanged: setInternetEnabled, activeColor: cyan),
           const Spacer(),
