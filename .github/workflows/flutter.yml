@@ -331,7 +331,7 @@ jobs:
               raise SystemExit("ASTRA_SIGNING_KEY secret is missing.")
           try:
               data = json.loads(raw)
-              encoded = re.sub(r"\\s+", "", data["keystore_base64"])
+              encoded = re.sub(r"\s+", "", data["keystore_base64"])
               decoded = base64.b64decode(encoded, validate=True)
               password = data["password"]
               alias = data.get("alias", "astra").strip() or "astra"
@@ -358,7 +358,7 @@ jobs:
               "    }",
           ]
           if 'create("astraRelease")' not in gradle:
-              gradle = gradle.replace("android {", "android {\\n" + "\\n".join(signing_lines), 1)
+              gradle = gradle.replace("android {", "android {\n" + "\\n".join(signing_lines), 1)
           gradle = gradle.replace(
               'signingConfig = signingConfigs.getByName("debug")',
               'signingConfig = signingConfigs.getByName("astraRelease")'
@@ -370,7 +370,7 @@ jobs:
           delimiter = "ASTRA_" + uuid.uuid4().hex
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
               for name, value in (("ASTRA_SIGNING_PASSWORD", password), ("ASTRA_SIGNING_ALIAS", alias)):
-                  f.write(f"{name}<<{delimiter}\\n{value}\\n{delimiter}\\n")
+                  f.write(f"{name}<<{delimiter}\n{value}\n{delimiter}\n")
 
           subprocess.run([
               "keytool", "-list", "-keystore", str(keystore),
