@@ -317,31 +317,39 @@ jobs:
           tree.write(path, encoding="utf-8", xml_declaration=True)
           PY
 
-      - name: Configure permanent ASTRA release signing (required)
+      - name: Configure permanent ASTRA release signing (single secret)
         env:
-          ASTRA_KEYSTORE_BASE64: ${{ secrets.ASTRA_KEYSTORE_BASE64 }}
-          ASTRA_KEYSTORE_PASSWORD: ${{ secrets.ASTRA_KEYSTORE_PASSWORD }}
-          ASTRA_KEY_ALIAS: ${{ secrets.ASTRA_KEY_ALIAS }}
-          ASTRA_KEY_PASSWORD: ${{ secrets.ASTRA_KEY_PASSWORD }}
+          ASTRA_SIGNING_BUNDLE: ${{ secrets.ASTRA_SIGNING_BUNDLE }}
         run: |
           set -e
           python3 - <<'PY'
-          import os, base64, re
+          import os, base64, json, re, subprocess, uuid
           from pathlib import Path
-          raw = os.getenv("ASTRA_KEYSTORE_BASE64", "")
-          encoded = re.sub(r"\s+", "", raw)
+
+          raw = os.getenv("ASTRA_SIGNING_BUNDLE", "").strip()
+          if not raw:
+              raise SystemExit("ASTRA_SIGNING_BUNDLE secret is missing.")
           try:
+              bundle = json.loads(raw)
+              encoded = re.sub(r"\\s+", "", bundle["keystore_base64"])
               decoded = base64.b64decode(encoded, validate=True)
+              store_password = bundle["store_password"]
+              key_password = bundle["key_password"]
+              alias = bundle.get("key_alias", "astra").strip() or "astra"
           except Exception:
-              raise SystemExit("ASTRA_KEYSTORE_BASE64 is missing or invalid.")
-          if not decoded:
-              raise SystemExit("ASTRA_KEYSTORE_BASE64 is empty.")
-          store_password = os.getenv("ASTRA_KEYSTORE_PASSWORD", "")
-          key_password = os.getenv("ASTRA_KEY_PASSWORD", "")
-          alias = os.getenv("ASTRA_KEY_ALIAS", "").strip() or "astra"
-          if not store_password or not key_password:
-              raise SystemExit("Missing ASTRA_KEYSTORE_PASSWORD or ASTRA_KEY_PASSWORD secret.")
-          Path("android/app/astra-release.jks").write_bytes(decoded)
+              raise SystemExit("ASTRA_SIGNING_BUNDLE is invalid. Expected JSON with keystore_base64, store_password, key_password and optional key_alias.")
+          if not decoded or not store_password or not key_password:
+              raise SystemExit("ASTRA_SIGNING_BUNDLE is missing required signing data.")
+
+          keystore = Path("android/app/astra-release.jks")
+          keystore.write_bytes(decoded)
+          env = os.environ.copy()
+          env.update({
+              "ASTRA_KEYSTORE_PASSWORD": store_password,
+              "ASTRA_KEY_PASSWORD": key_password,
+              "ASTRA_KEY_ALIAS": alias,
+          })
+
           gradle_path = Path("android/app/build.gradle.kts")
           if not gradle_path.exists():
               raise SystemExit("android/app/build.gradle.kts was not generated.")
@@ -351,14 +359,13 @@ jobs:
               '        create("astraRelease") {',
               '            storeFile = file("astra-release.jks")',
               '            storePassword = System.getenv("ASTRA_KEYSTORE_PASSWORD")',
-              '            keyAlias = System.getenv("ASTRA_KEY_ALIAS").takeUnless { it.isNullOrBlank() } ?: "astra"',
+              '            keyAlias = System.getenv("ASTRA_KEY_ALIAS") ?: "astra"',
               '            keyPassword = System.getenv("ASTRA_KEY_PASSWORD")',
               "        }",
               "    }",
           ]
-          signing_block = "\n".join(signing_lines)
           if 'create("astraRelease")' not in gradle:
-              gradle = gradle.replace("android {", "android {\n" + signing_block, 1)
+              gradle = gradle.replace("android {", "android {\\n" + "\\n".join(signing_lines), 1)
           gradle = gradle.replace(
               'signingConfig = signingConfigs.getByName("debug")',
               'signingConfig = signingConfigs.getByName("astraRelease")'
@@ -366,10 +373,22 @@ jobs:
           if 'signingConfig = signingConfigs.getByName("astraRelease")' not in gradle:
               raise SystemExit("Release build type was not connected to ASTRA signing.")
           gradle_path.write_text(gradle)
-          print("Persistent ASTRA release signing configured.")
+
+          delimiter = "ASTRA_" + uuid.uuid4().hex
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as github_env:
+              for name, value in (
+                  ("ASTRA_KEYSTORE_PASSWORD", store_password),
+                  ("ASTRA_KEY_PASSWORD", key_password),
+                  ("ASTRA_KEY_ALIAS", alias),
+              ):
+                  github_env.write(f"{name}<<{delimiter}\\n{value}\\n{delimiter}\\n")
+
+          subprocess.run([
+              "keytool", "-list", "-keystore", str(keystore),
+              "-storepass", store_password, "-alias", alias
+          ], check=True, stdout=subprocess.DEVNULL)
+          print("ASTRA release keystore verified from the single signing secret.")
           PY
-          keytool -list -keystore android/app/astra-release.jks -storepass "$ASTRA_KEYSTORE_PASSWORD" -alias "${ASTRA_KEY_ALIAS:-astra}" >/dev/null
-          echo "ASTRA release keystore verified."
 
       - name: Install dependencies
         run: flutter pub get
